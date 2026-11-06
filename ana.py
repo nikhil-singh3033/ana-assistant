@@ -1,7 +1,7 @@
 """
 ANA - Laptop Voice Assistant (floating Siri-style UI)
 
-Run:  python ana.py
+Run:  python ana.py      (ek baar: python ana.py --install-startup  -> laptop on hote hi apne aap chalegi)
 Jagane ke liye bolo:  "Hey Ana"  (ya sirf "Ana")
 Ya neeche text box mein command type karo.
 """
@@ -13,9 +13,12 @@ import platform
 import queue
 import random
 import re
+import socket
 import subprocess
+import sys
 import threading
 import time
+import traceback
 import tkinter as tk
 import urllib.parse
 import webbrowser
@@ -222,8 +225,9 @@ def handle(cmd, assistant):
 
 # ------------------------------------------------------------------- voice --
 class Voice:
-    def __init__(self, ui_queue):
+    def __init__(self, ui_queue, quiet=False):
         self.q = ui_queue
+        self.quiet = quiet          # startup par 'ready hai' na bole
         self.rec = sr.Recognizer()
         self.rec.dynamic_energy_threshold = True
         self.rec.pause_threshold = 0.8
@@ -316,7 +320,8 @@ class Voice:
             return
         with mic as src:
             self.rec.adjust_for_ambient_noise(src, duration=1)
-        self.speak(f"{ASSISTANT_NAME} ready hai. Hey Ana bolkar jagao")
+        if not self.quiet:
+            self.speak(f"{ASSISTANT_NAME} ready hai. Hey Ana bolkar jagao")
 
         while self.running:
             if self.muted:
@@ -349,15 +354,18 @@ class Voice:
 
 
 # ---------------------------------------------------------------------- UI --
-# Poora UI Pillow se draw hota hai (glow, gradient, glass orb), tkinter sirf dikhata hai.
+# Siri jaisa chhota gol orb. Pillow se draw hota hai, tkinter sirf dikhata hai.
 LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
 BILINEAR = getattr(Image, "Resampling", Image).BILINEAR
 
-KEY = (1, 1, 1)                 # window ke bahar ka transparent rang
+HIDE_WHEN_SLEEPING = True       # True: so rahi ho to orb chhup jata hai (tray icon se control)
+KEY = (1, 1, 1)                 # window ka transparent rang
 KEY_HEX = "#010101"
-W, H = 380, 610
-CARD_BOX = (10, 10, 370, 600)
-RADIUS = 64
+W, H = 340, 240
+ORB_R, ORB_S = 36, 150          # orb ka radius aur uska region
+ORB_C = (W // 2, H - ORB_S // 2 - 6)
+BUBBLE_BOTTOM = 112             # text bubble ka neeche ka kinara (orb ke upar)
+BUBBLE_FILL, BUBBLE_EDGE = "#0c0f1d", "#2b3354"
 
 C_CYAN = (34, 211, 238)
 C_SKY = (56, 189, 248)
@@ -366,23 +374,16 @@ C_PURPLE = (168, 85, 247)
 C_MAGENTA = (217, 70, 239)
 C_PINK = (244, 63, 140)
 
-ORB_C, ORB_R, ORB_S = (190, 222), 94, 300
-BAR_C, BAR_W, BAR_H = (190, 462), 300, 70
-MIC_C, MIC_M = (190, 540), 116
-KBD_C, GEAR_C, SIDE_R = (102, 540), (278, 540), 24
-
-# state ke hisaab se orb ke 3 petal-groups ke rang, roshni, speed...
+# state ke hisaab se petal-groups ke rang, roshni, speed, size
 PAL = {
-    "sleeping":  dict(c=(C_CYAN, C_PINK, C_PURPLE), inten=0.42, pulse=0.03, speed=0.35, bars=0.0, glow=0.35),
-    "listening": dict(c=(C_CYAN, C_PINK, C_PURPLE), inten=0.95, pulse=0.10, speed=1.00, bars=18.0, glow=0.85),
-    "thinking":  dict(c=(C_PURPLE, C_BLUE, C_CYAN), inten=0.90, pulse=0.06, speed=2.60, bars=7.0, glow=0.80),
-    "speaking":  dict(c=(C_PINK, C_CYAN, C_PURPLE), inten=1.00, pulse=0.28, speed=1.50, bars=30.0, glow=1.00),
-    "muted":     dict(c=((107, 114, 128), (75, 85, 99), (55, 65, 81)), inten=0.30, pulse=0.0,
-                      speed=0.15, bars=0.0, glow=0.12),
+    "sleeping":  dict(c=(C_CYAN, C_PINK, C_PURPLE), inten=0.55, pulse=0.03, speed=0.35, scale=0.72),
+    "listening": dict(c=(C_CYAN, C_PINK, C_PURPLE), inten=0.95, pulse=0.10, speed=1.00, scale=1.00),
+    "thinking":  dict(c=(C_PURPLE, C_BLUE, C_CYAN), inten=0.90, pulse=0.06, speed=2.60, scale=1.00),
+    "speaking":  dict(c=(C_PINK, C_CYAN, C_PURPLE), inten=1.00, pulse=0.28, speed=1.50, scale=1.00),
+    "muted":     dict(c=((107, 114, 128), (75, 85, 99), (55, 65, 81)), inten=0.35, pulse=0.0,
+                      speed=0.15, scale=0.72),
 }
 OMEGA = (0.9, -0.7, 0.45)       # har group kitni tezi se ghoomta hai
-BAR_STOPS = [(0.0, C_CYAN), (0.35, (59, 130, 246)), (0.55, (124, 92, 250)),
-             (0.78, C_MAGENTA), (1.0, C_PINK)]
 
 
 def lerp3(a, b, t):
@@ -393,13 +394,6 @@ def ci(c):
     return tuple(max(0, min(255, int(round(v)))) for v in c)
 
 
-def ramp(frac):
-    for (f0, c0), (f1, c1) in zip(BAR_STOPS, BAR_STOPS[1:]):
-        if frac <= f1:
-            return lerp3(c0, c1, (frac - f0) / (f1 - f0))
-    return BAR_STOPS[-1][1]
-
-
 def corner_gradient(size, tl, tr, br, bl):
     """4 corners ke rang se smooth gradient."""
     w, h = size
@@ -408,18 +402,6 @@ def corner_gradient(size, tl, tr, br, bl):
     top = Image.composite(Image.new("RGB", (w, h), tr), Image.new("RGB", (w, h), tl), hm)
     bot = Image.composite(Image.new("RGB", (w, h), br), Image.new("RGB", (w, h), bl), hm)
     return Image.composite(bot, top, vm)
-
-
-def rr_mask(size, box, r, width=None, ss=4):
-    w, h = size
-    m = Image.new("L", (w * ss, h * ss), 0)
-    d = ImageDraw.Draw(m)
-    b = [v * ss for v in box]
-    if width is None:
-        d.rounded_rectangle(b, radius=r * ss, fill=255)
-    else:
-        d.rounded_rectangle(b, radius=r * ss, outline=255, width=int(width * ss))
-    return m.resize((w, h), LANCZOS)
 
 
 def disc_mask(size, cx, cy, r, ss=4):
@@ -451,166 +433,46 @@ def tint(mask, color, size):
     return Image.composite(Image.new("RGB", size, ci(color)), Image.new("RGB", size, (0, 0, 0)), mask)
 
 
-def small_patch(size, draw_fn, ss=4):
-    """Chhote icon ko supersample karke L mask banao."""
-    w, h = size
-    m = Image.new("L", (w * ss, h * ss), 0)
-    draw_fn(ImageDraw.Draw(m), ss)
-    return m.resize((w, h), LANCZOS)
-
-
-# ---- icons (sab L masks) -----------------------------------------------
-def star_mask(size, cx, cy, r_out, r_in):
-    def fn(d, ss):
-        pts = []
-        for k in range(8):
-            ang = math.pi / 4 * k - math.pi / 2
-            rr = r_out if k % 2 == 0 else r_in
-            pts.append(((cx + rr * math.cos(ang)) * ss, (cy + rr * math.sin(ang)) * ss))
-        d.polygon(pts, fill=255)
-    return small_patch(size, fn)
-
-
-def keyboard_mask(size):
-    def fn(d, ss):
-        d.rounded_rectangle([7 * ss, 14 * ss, 41 * ss, 34 * ss], radius=5 * ss, outline=255, width=2 * ss)
-        for row, y in enumerate((18.5, 23.5)):
-            for i in range(6):
-                x = 11.5 + i * 4.6 + (2.3 if row else 0)
-                if x < 37:
-                    d.rounded_rectangle([x * ss, y * ss, (x + 2) * ss, (y + 2) * ss], radius=ss * 0.5, fill=255)
-        d.rounded_rectangle([14 * ss, 28.2 * ss, 34 * ss, 30.4 * ss], radius=ss, fill=255)
-    return small_patch(size, fn)
-
-
-def gear_mask(size):
-    def fn(d, ss):
-        c = 24 * ss
-        d.ellipse([c - 9.5 * ss, c - 9.5 * ss, c + 9.5 * ss, c + 9.5 * ss], fill=255)
-        for k in range(8):
-            ang = k * math.pi / 4
-            ca, sa = math.cos(ang), math.sin(ang)
-            pts = []
-            for (u, v) in ((8, -2.6), (13, -2.6), (13, 2.6), (8, 2.6)):
-                pts.append((c + (u * ca - v * sa) * ss, c + (u * sa + v * ca) * ss))
-            d.polygon(pts, fill=255)
-        d.ellipse([c - 4.4 * ss, c - 4.4 * ss, c + 4.4 * ss, c + 4.4 * ss], fill=0)
-    return small_patch(size, fn)
-
-
-def mic_icon_mask(size, slash=False):
-    def fn(d, ss):
-        c = size[0] / 2
-        d.rounded_rectangle([(c - 6.5) * ss, (c - 18) * ss, (c + 6.5) * ss, (c + 4) * ss],
-                            radius=6.5 * ss, fill=255)
-        d.arc([(c - 12.5) * ss, (c - 11) * ss, (c + 12.5) * ss, (c + 14) * ss], 0, 180, fill=255, width=2 * ss)
-        d.line([c * ss, (c + 14) * ss, c * ss, (c + 20) * ss], fill=255, width=2 * ss)
-        d.line([(c - 6) * ss, (c + 20) * ss, (c + 6) * ss, (c + 20) * ss], fill=255, width=2 * ss)
-        if slash:
-            d.line([(c - 15) * ss, (c - 16) * ss, (c + 15) * ss, (c + 18) * ss], fill=255, width=3 * ss)
-    return small_patch(size, fn)
-
-
-# ---- static background (ek baar banta hai) -------------------------------
-def build_static():
-    size = (W, H)
-    grad = corner_gradient(size, C_SKY, C_MAGENTA, C_CYAN, C_PINK)
-
-    vm = Image.linear_gradient("L").resize(size)
-    card = Image.composite(Image.new("RGB", size, (5, 6, 14)), Image.new("RGB", size, (8, 10, 22)), vm)
-
-    inner = lut_scale(rr_mask(size, CARD_BOX, RADIUS, width=16).filter(ImageFilter.GaussianBlur(15)), 0.38)
-    card = Image.composite(grad, card, inner)
-    soft = lut_scale(rr_mask(size, CARD_BOX, RADIUS, width=5).filter(ImageFilter.GaussianBlur(2)), 0.65)
-    card = Image.composite(grad, card, soft)
-    card = Image.composite(grad, card, rr_mask(size, CARD_BOX, RADIUS, width=2))
-
-    # header: sparkle star
-    sg = corner_gradient(size, C_PURPLE, C_SKY, C_CYAN, C_BLUE)
-    star = star_mask(size, 59, 54, 17, 4.2)
-    star_glow = lut_scale(star.filter(ImageFilter.GaussianBlur(5)), 0.55)
-    card = Image.composite(sg, card, star_glow)
-    card = Image.composite(sg, card, star)
-
-    # "Online" pill
-    pill_box = (266, 41, 336, 67)
-    card = Image.composite(Image.new("RGB", size, (11, 14, 26)), card, rr_mask(size, pill_box, 13))
-    card = Image.composite(Image.new("RGB", size, (38, 44, 62)), card, rr_mask(size, pill_box, 13, width=1))
-
-    # side buttons (keyboard, gear)
-    for (cx, cy), icon in ((KBD_C, keyboard_mask((2 * SIDE_R, 2 * SIDE_R))), (GEAR_C, gear_mask((2 * SIDE_R, 2 * SIDE_R)))):
-        card = Image.composite(Image.new("RGB", size, (11, 14, 26)), card,
-                               disc_mask(size, cx, cy, SIDE_R))
-        ring = ImageChops.subtract(disc_mask(size, cx, cy, SIDE_R), disc_mask(size, cx, cy, SIDE_R - 1.2))
-        card = Image.composite(Image.new("RGB", size, (34, 40, 58)), card, ring)
-        full = Image.new("L", size, 0)
-        full.paste(icon, (cx - SIDE_R, cy - SIDE_R))
-        card = Image.composite(Image.new("RGB", size, (190, 196, 212)), card, full)
-
-    # card ke bahar ka hissa transparent key rang
-    return Image.composite(card, Image.new("RGB", size, KEY), rr_mask(size, CARD_BOX, RADIUS))
-
-
-# ---- dynamic renderer ----------------------------------------------------
 class Renderer:
     def __init__(self):
-        self.static = build_static()
-        S = ORB_S
+        S, R = ORB_S, ORB_R
+        c = S / 2
+        self.key = Image.new("RGB", (S, S), KEY)
         self.black = Image.new("RGB", (S, S), (0, 0, 0))
-
-        # orb ke assets
-        c, R = S / 2, ORB_R
         self.sphere_mask = disc_mask((S, S), c, c, R)
+
         base_c = Image.new("RGB", (S, S), (2, 4, 16))
         base_e = Image.new("RGB", (S, S), (6, 22, 54))
         self.sphere_base = Image.composite(base_e, base_c, radial_L(R, S, power=1.7))
         og = corner_gradient((S, S), C_SKY, C_MAGENTA, C_CYAN, C_PINK)
         rim_soft = Image.composite(og, self.black, lut_scale(radial_L(R, S, power=6.5), 0.55))
-        ring_m = ImageChops.subtract(disc_mask((S, S), c, c, R), disc_mask((S, S), c, c, R - 2.4))
-        rim_ring = Image.composite(og, self.black, ring_m.filter(ImageFilter.GaussianBlur(0.6)))
+        ring_m = ImageChops.subtract(disc_mask((S, S), c, c, R), disc_mask((S, S), c, c, R - 1.7))
+        rim_ring = Image.composite(og, self.black, ring_m)
         hl = Image.new("L", (S, S), 0)
         ImageDraw.Draw(hl).ellipse([c - 0.72 * R, c - 0.82 * R, c - 0.05 * R, c - 0.30 * R], fill=42)
-        hl = hl.filter(ImageFilter.GaussianBlur(9))
+        hl = hl.filter(ImageFilter.GaussianBlur(3.5))
         self.rim = ImageChops.screen(ImageChops.screen(rim_soft, rim_ring),
                                      Image.composite(Image.new("RGB", (S, S), (200, 230, 255)), self.black, hl))
-        self.glow_mask = radial_L(S // 2 - 1, S, power=2.2, invert=True)
         self.center_mask = radial_L(int(R * 0.52), S, power=1.8, invert=True)
 
-        # waveform / mic ke assets
-        self.bar_bg = self.static.crop((BAR_C[0] - BAR_W // 2, BAR_C[1] - BAR_H // 2,
-                                        BAR_C[0] + BAR_W // 2, BAR_C[1] + BAR_H // 2)).convert("RGBA")
-        M = MIC_M
-        mc = M / 2
-        self.mic_bg = self.static.crop((MIC_C[0] - M // 2, MIC_C[1] - M // 2,
-                                        MIC_C[0] + M // 2, MIC_C[1] + M // 2))
-        self.mic_disc = disc_mask((M, M), mc, mc, 31)
-        self.mic_ring = ImageChops.subtract(disc_mask((M, M), mc, mc, 34), disc_mask((M, M), mc, mc, 31.2))
-        self.mic_icon = mic_icon_mask((M, M))
-        self.mic_icon_muted = mic_icon_mask((M, M), slash=True)
-        self.mic_grad = corner_gradient((M, M), C_CYAN, C_BLUE, C_PURPLE, C_SKY)
-        self.mic_grad_muted = corner_gradient((M, M), (248, 113, 113), (220, 60, 60), (185, 28, 28), (239, 90, 90))
-        self.orb_bg = self.static.crop((ORB_C[0] - S // 2, ORB_C[1] - S // 2,
-                                        ORB_C[0] + S // 2, ORB_C[1] + S // 2))
-
-        # animation state
         th = PAL["sleeping"]
         self.cur = dict(c=[tuple(x) for x in th["c"]], inten=th["inten"], pulse=th["pulse"],
-                        speed=th["speed"], bars=th["bars"], glow=th["glow"])
+                        speed=th["speed"], scale=th["scale"])
         self.phase = [0.0, 2.0, 4.0]
         self.t = 0.0
         self.ring = None            # jaagne par phailne wali ring (0..1)
 
     def _blend_state(self, state, dt):
         th = PAL.get(state, PAL["sleeping"])
-        k = 1 - math.exp(-dt * 6.0)
+        k = 1 - math.exp(-dt * 7.0)
         self.cur["c"] = [lerp3(a, b, k) for a, b in zip(self.cur["c"], th["c"])]
-        for key in ("inten", "pulse", "speed", "bars", "glow"):
+        for key in ("inten", "pulse", "speed", "scale"):
             self.cur[key] += (th[key] - self.cur[key]) * k
         self.t += dt
         for i in range(3):
             self.phase[i] += OMEGA[i] * self.cur["speed"] * dt
         if self.ring is not None:
-            self.ring += dt * 1.1
+            self.ring += dt * 1.2
             if self.ring >= 1:
                 self.ring = None
 
@@ -636,93 +498,153 @@ class Renderer:
                     ex, ey = a * math.cos(th), b * math.sin(th)
                     pts.append((ex0 + ex * ca - ey * sa, ey0 + ex * sa + ey * ca))
                 d.polygon(pts, fill=255)
-            m = lut_scale(m.filter(ImageFilter.GaussianBlur(3.2)), al * cur["inten"])
+            m = lut_scale(m.filter(ImageFilter.GaussianBlur(1.3)), al * cur["inten"])
             base = ImageChops.screen(base, tint(m, cur["c"][gi], (S, S)))
 
         flick = 0.88 + 0.12 * math.sin(self.t * 2.3)
         cg = lut_scale(self.center_mask, min(1.0, (0.25 + 0.75 * cur["inten"] ** 1.4) * flick))
         base = ImageChops.screen(base, tint(cg, (235, 250, 255), (S, S)))
-        base = ImageChops.screen(base, Image.blend(self.black, self.rim, 0.35 + 0.65 * cur["inten"]))
+        base = ImageChops.screen(base, Image.blend(self.black, self.rim, 0.40 + 0.60 * cur["inten"]))
 
-        gcol = lerp3(cur["c"][0], cur["c"][2], 0.5)
-        bg = self.orb_bg.copy()
-        bg = ImageChops.screen(bg, tint(lut_scale(self.glow_mask, 0.42 * cur["glow"]), gcol, (S, S)))
-
+        bg = self.key.copy()
         if self.ring is not None:                       # jaagne ki ring
             p = self.ring
             rm = Image.new("L", (S, S), 0)
-            rr = R + 8 + p * 48
-            ImageDraw.Draw(rm).ellipse([c - rr, c - rr, c + rr, c + rr], outline=255, width=3)
-            rm = lut_scale(rm.filter(ImageFilter.GaussianBlur(1.2)), (1 - p) * 0.95)
+            rr = R + 4 + p * (S / 2 - R - 8)
+            ImageDraw.Draw(rm).ellipse([c - rr, c - rr, c + rr, c + rr], outline=255, width=2)
+            rm = lut_scale(rm.filter(ImageFilter.GaussianBlur(0.8)), (1 - p) * 1.1)
             bg = ImageChops.screen(bg, tint(rm, lerp3(cur["c"][0], (255, 255, 255), 0.3), (S, S)))
-
         bg.paste(base, (0, 0), self.sphere_mask)
         return bg
 
-    def render_bars(self):
-        w, h, ss = BAR_W, BAR_H, 3
-        strip = Image.new("RGBA", (w * ss, h * ss), (0, 0, 0, 0))
-        d = ImageDraw.Draw(strip)
-        amp = self.cur["bars"]
-        speed = max(self.cur["speed"], 0.6)
-        bw = 4.0
-        for k in range(-13, 14):
-            x = w / 2 + k * 10.4
-            col = ramp((k + 13) / 26.0)
-            if abs(k) <= 10:
-                env = max(0.0, 1 - (abs(k) / 10.6) ** 1.6)
-                wave = abs(math.sin(self.t * speed * 1.4 + k * 0.7) * math.sin(self.t * 1.9 + k * 0.45))
-                hh = 2.2 + amp * env * (0.18 + 0.82 * wave)
-                d.rounded_rectangle([(x - bw / 2) * ss, (h / 2 - hh) * ss, (x + bw / 2) * ss, (h / 2 + hh) * ss],
-                                    radius=bw / 2 * ss, fill=ci(col) + (255,))
-            else:
-                r = 1.9
-                d.ellipse([(x - r) * ss, (h / 2 - r) * ss, (x + r) * ss, (h / 2 + r) * ss],
-                          fill=ci(lerp3((20, 24, 38), col, 0.35)) + (255,))
-        strip = strip.resize((w, h), LANCZOS)
-        glow = strip.filter(ImageFilter.GaussianBlur(3.5))
-        a = glow.getchannel("A").point([int(v * 0.65) for v in range(256)])
-        glow.putalpha(a)
-        out = Image.alpha_composite(self.bar_bg, glow)
-        out = Image.alpha_composite(out, strip)
-        return out.convert("RGB")
-
-    def render_mic(self, muted):
-        M = MIC_M
-        grad = self.mic_grad_muted if muted else self.mic_grad
-        g = self.cur["glow"] * (0.8 + 0.2 * math.sin(self.t * 3.0))
-        out = self.mic_bg.copy()
-        halo = lut_scale(self.mic_ring.filter(ImageFilter.GaussianBlur(7)), 2.2 * g)
-        out = ImageChops.screen(out, Image.composite(grad, Image.new("RGB", (M, M), (0, 0, 0)), halo))
-        out.paste(Image.new("RGB", (M, M), (9, 12, 24)), (0, 0), self.mic_disc)
-        out = Image.composite(grad, out, self.mic_ring)
-        icon = self.mic_icon_muted if muted else self.mic_icon
-        out = Image.composite(Image.new("RGB", (M, M), (252, 165, 165) if muted else (236, 240, 250)), out, icon)
-        return out
-
-    def render(self, state, dt, muted, want_bars=True):
+    def render(self, state, dt, muted):
         self._blend_state("muted" if muted else state, dt)
-        return self.render_orb(), (self.render_bars() if want_bars else None), self.render_mic(muted)
+        orb = self.render_orb()
+        sc = self.cur["scale"]
+        if abs(sc - 1) > 0.01:                          # so rahi ho to chhota orb
+            n = max(8, int(ORB_S * sc))
+            small = orb.resize((n, n), LANCZOS)
+            out = self.key.copy()
+            off = (ORB_S - n) // 2
+            out.paste(small, (off, off))
+            return out
+        return orb
+
+    def tray_icon(self):
+        for _ in range(25):
+            self._blend_state("listening", 0.05)
+        orb = self.render_orb()
+        icon = Image.new("RGBA", (ORB_S, ORB_S), (0, 0, 0, 0))
+        icon.paste(orb, (0, 0), self.sphere_mask)
+        m = ORB_S // 2 - ORB_R - 1
+        return icon.crop((m, m, ORB_S - m, ORB_S - m)).resize((64, 64), LANCZOS)
+
+
+# ---- background mein chalna: startup, single instance, tray ---------------
+STARTUP_FILE = "ana_assistant.vbs"
+LOCK_PORT = 47653
+
+
+def script_path():
+    return os.path.abspath(__file__)
+
+
+def pythonw_path():
+    exe = sys.executable
+    if OS == "Windows":
+        pw = os.path.join(os.path.dirname(exe), "pythonw.exe")      # bina console window ke
+        if os.path.exists(pw):
+            return pw
+    return exe
+
+
+def startup_path():
+    base = os.environ.get("APPDATA", "")
+    return os.path.join(base, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", STARTUP_FILE)
+
+
+def is_startup_enabled():
+    return OS == "Windows" and os.path.exists(startup_path())
+
+
+def launch_detached():
+    flags = 0x00000008 | 0x00000200 if OS == "Windows" else 0     # DETACHED_PROCESS | NEW_PROCESS_GROUP
+    subprocess.Popen([pythonw_path(), script_path(), "--quiet"], cwd=os.path.dirname(script_path()),
+                     creationflags=flags, close_fds=True)
+
+
+def install_startup():
+    if OS != "Windows":
+        return False
+    pw, sp = pythonw_path(), script_path()
+    vbs = ('Set s = CreateObject("WScript.Shell")\n'
+           f's.CurrentDirectory = "{os.path.dirname(sp)}"\n'
+           f's.Run """{pw}"" ""{sp}"" --quiet", 0, False\n')
+    os.makedirs(os.path.dirname(startup_path()), exist_ok=True)
+    with open(startup_path(), "w", encoding="utf-8") as f:
+        f.write(vbs)
+    return True
+
+
+def remove_startup():
+    try:
+        os.remove(startup_path())
+    except OSError:
+        pass
+
+
+def acquire_lock():
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", LOCK_PORT))
+        return s
+    except OSError:
+        return None
+
+
+def start_tray(app):
+    """System tray icon (pystray ho to). True return kare to tray chal raha hai."""
+    try:
+        import pystray
+    except Exception:
+        return False
+    try:
+        put = app.q.put
+        items = [
+            pystray.MenuItem("Always show orb", lambda: put(("cmd", "pin")), checked=lambda i: app.pinned,
+                             default=True),
+            pystray.MenuItem("Mute mic", lambda: put(("cmd", "mute")), checked=lambda i: app.voice.muted),
+        ]
+        if OS == "Windows":
+            items.append(pystray.MenuItem("Start with Windows", lambda: put(("cmd", "startup")),
+                                          checked=lambda i: is_startup_enabled()))
+        items.append(pystray.MenuItem("Quit Ana", lambda: put(("cmd", "quit"))))
+        icon = pystray.Icon("Ana", app.r.tray_icon(), "Ana", pystray.Menu(*items))
+        icon.run_detached()
+        app.tray = icon
+        return True
+    except Exception as e:
+        print("Tray start nahi hua:", e)
+        return False
 
 
 # ---- window ----------------------------------------------------------------
 PLACEHOLDER = "Type a command…"
-DEFAULT_TITLE = "Hello, I'm ANA"
 
 
 class App:
-    def __init__(self):
+    def __init__(self, quiet=False):
         from PIL import ImageTk
 
         self.root = tk.Tk()
         self.root.title(ASSISTANT_NAME)
-        self.root.overrideredirect(True)            # bina title bar ka floating card
+        self.root.overrideredirect(True)            # bina title bar ke
         self.root.attributes("-topmost", True)
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry(f"{W}x{H}+{sw - W - 20}+{max(10, sh - H - 70)}")
+        self.root.geometry(f"{W}x{H}+{sw - W - 24}+{max(10, sh - H - 70)}")
         self.root.configure(bg=KEY_HEX)
         try:
-            self.root.attributes("-transparentcolor", KEY_HEX)   # gol corners (Windows)
+            self.root.attributes("-transparentcolor", KEY_HEX)   # orb ke bahar sab transparent (Windows)
         except tk.TclError:
             pass
         self.topmost = tk.BooleanVar(value=True)
@@ -730,28 +652,19 @@ class App:
         self.r = Renderer()
         c = self.canvas = tk.Canvas(self.root, width=W, height=H, bg=KEY_HEX, highlightthickness=0)
         c.pack()
-
-        self.p_static = ImageTk.PhotoImage(self.r.static)
-        c.create_image(0, 0, image=self.p_static, anchor="nw")
-        self.p_orb = ImageTk.PhotoImage(self.r.orb_bg)
+        self.p_orb = ImageTk.PhotoImage(self.r.key)
         c.create_image(ORB_C[0] - ORB_S // 2, ORB_C[1] - ORB_S // 2, image=self.p_orb, anchor="nw")
-        self.p_bars = ImageTk.PhotoImage(self.r.bar_bg.convert("RGB"))
-        self.bars_item = c.create_image(BAR_C[0] - BAR_W // 2, BAR_C[1] - BAR_H // 2,
-                                        image=self.p_bars, anchor="nw")
-        self.p_mic = ImageTk.PhotoImage(self.r.mic_bg)
-        c.create_image(MIC_C[0] - MIC_M // 2, MIC_C[1] - MIC_M // 2, image=self.p_mic, anchor="nw")
 
-        # text items (sab images ke upar)
-        c.create_text(83, 54, text="ANA AI", anchor="w", fill="#e8eaf2", font=("Segoe UI Semibold", 14))
-        self.dot = c.create_oval(277, 50, 285, 58, fill="#22c55e", outline="")
-        self.pill_txt = c.create_text(292, 54, text="Online", anchor="w", fill="#e5e7eb", font=("Segoe UI", 10))
-        self.title_id = c.create_text(W / 2, 380, text=DEFAULT_TITLE, anchor="s", fill="#ffffff",
-                                      width=320, justify="center", font=("Segoe UI Semibold", 20))
-        self.sub_id = c.create_text(W / 2, 390, text="", anchor="n", fill="#8a90a2",
-                                    width=300, justify="center", font=("Segoe UI", 12))
-        self._shown = (None, None, None)
+        # caption bubble (jo bola + Ana ka jawab)
+        self.bubble = c.create_polygon(0, 0, 0, 0, 0, 0, smooth=True, fill=BUBBLE_FILL,
+                                       outline=BUBBLE_EDGE, width=1, state="hidden")
+        self.heard_id = c.create_text(W / 2, 90, text="", anchor="s", fill="#8a90a2", width=300,
+                                      justify="center", font=("Segoe UI", 10, "italic"), state="hidden")
+        self.reply_id = c.create_text(W / 2, 100, text="", anchor="s", fill="#f3f4f6", width=300,
+                                      justify="center", font=("Segoe UI", 12), state="hidden")
+        self._bubble_shown = None
 
-        # typed command ka text box (keyboard button se khulta hai)
+        # typed command ka text box
         self.entry = tk.Entry(self.root, bg="#0d1120", fg="#6b7280", insertbackground="#e5e7eb",
                               relief="flat", font=("Segoe UI", 12), highlightthickness=1,
                               highlightbackground="#2a3150", highlightcolor="#38bdf8")
@@ -760,76 +673,104 @@ class App:
         self.entry.bind("<FocusOut>", self.entry_focus_out)
         self.entry.bind("<Button-1>", lambda e: self.entry.focus_force())
         self.entry.bind("<Return>", self.submit_text)
-        self.entry_win = c.create_window(BAR_C[0], BAR_C[1], window=self.entry, width=252, height=36,
-                                         state="hidden")
+        self.entry.bind("<Escape>", lambda e: self.toggle_entry())
+        self.entry_win = c.create_window(W / 2, 96, window=self.entry, width=290, height=36, state="hidden")
 
         self.menu = tk.Menu(self.root, tearoff=0, bg="#0e1220", fg="#e5e7eb", bd=0,
                             activebackground="#1d2540", activeforeground="#ffffff")
+        self.menu.add_command(label="Type a command", command=self.toggle_entry)
         self.menu.add_command(label="Mute / Unmute mic", command=self.toggle_mute)
         self.menu.add_checkbutton(label="Always on top", variable=self.topmost, command=self.apply_topmost)
+        if OS == "Windows":
+            self.menu.add_command(label="Start with Windows (on/off)", command=self.toggle_startup)
         self.menu.add_separator()
         self.menu.add_command(label="Quit Ana", command=self.close)
 
         c.bind("<ButtonPress-1>", self.on_press)
         c.bind("<B1-Motion>", self.on_drag)
-        c.bind("<Motion>", self.on_hover)
+        c.bind("<ButtonRelease-1>", self.on_release)
         c.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
-        self._dx = self._dy = 0
-        self._drag = False
+        self._press = None
 
         self.state = "sleeping"
         self.heard = ""
         self.reply = ""
         self.convo_until = 0.0
+        self.pinned = False
+        self.can_hide = False        # tray chalu hone par True hota hai
+        self.hidden = False
+        self.tray = None
+        self.last_wanted = time.time()
         self.last = time.time()
 
         self.q = queue.Queue()
-        self.voice = Voice(self.q)
+        self.voice = Voice(self.q, quiet=quiet)
         threading.Thread(target=self.voice.loop, daemon=True).start()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.tick()
 
-    # ---- clicks
+    # ---- mouse: click = jagao, drag = hilao
     @staticmethod
     def _near(x, y, centre, r):
         return (x - centre[0]) ** 2 + (y - centre[1]) ** 2 <= r * r
 
     def on_press(self, e):
-        self._drag = False
-        if self._near(e.x, e.y, MIC_C, 36):
-            self.toggle_mute()
-        elif self._near(e.x, e.y, KBD_C, SIDE_R + 3):
-            self.toggle_entry()
-        elif self._near(e.x, e.y, GEAR_C, SIDE_R + 3):
-            self.menu.tk_popup(e.x_root, e.y_root)
-        else:
-            self._drag = True
-            self._dx, self._dy = e.x, e.y
+        self._press = (e.x, e.y, self.root.winfo_x(), self.root.winfo_y(), e.x_root, e.y_root, False)
 
     def on_drag(self, e):
-        if self._drag:
-            x = self.root.winfo_x() + e.x - self._dx
-            y = self.root.winfo_y() + e.y - self._dy
-            self.root.geometry(f"+{x}+{y}")
+        if not self._press:
+            return
+        px, py, wx, wy, rx, ry, _ = self._press
+        if abs(e.x_root - rx) + abs(e.y_root - ry) > 4:
+            self._press = (px, py, wx, wy, rx, ry, True)
+        if self._press[6]:
+            self.root.geometry(f"+{wx + e.x_root - rx}+{wy + e.y_root - ry}")
 
-    def on_hover(self, e):
-        hot = (self._near(e.x, e.y, MIC_C, 36) or self._near(e.x, e.y, KBD_C, SIDE_R + 3)
-               or self._near(e.x, e.y, GEAR_C, SIDE_R + 3))
-        self.canvas.config(cursor="hand2" if hot else "")
+    def on_release(self, e):
+        if self._press and not self._press[6] and self._near(e.x, e.y, ORB_C, ORB_R + 10):
+            self.tap()
+        self._press = None
+
+    def tap(self):
+        if self.voice.muted:
+            self.toggle_mute()
+        else:
+            threading.Thread(target=self.voice.activate, daemon=True).start()
 
     def apply_topmost(self):
         self.root.attributes("-topmost", self.topmost.get())
 
+    def toggle_mute(self):
+        self.voice.muted = not self.voice.muted
+
+    def toggle_startup(self):
+        if is_startup_enabled():
+            remove_startup()
+            self.show_note("Startup band: ab Ana apne aap nahi chalegi")
+        else:
+            install_startup()
+            self.show_note("Ab Ana laptop on hote hi apne aap chalegi")
+
+    def show_note(self, text):
+        self.reply = text
+        self.heard = ""
+        self.convo_until = time.time() + 6
+
     def close(self):
         self.voice.running = False
+        if self.tray is not None:
+            try:
+                self.tray.stop()
+            except Exception:
+                pass
         self.root.destroy()
 
     # ---- text box
     def toggle_entry(self):
         showing = self.canvas.itemcget(self.entry_win, "state") == "normal"
         self.canvas.itemconfig(self.entry_win, state="hidden" if showing else "normal")
-        self.canvas.itemconfig(self.bars_item, state="normal" if showing else "hidden")
         if not showing:
+            self.show()
             self.entry.focus_force()
 
     def entry_focus_in(self, _e=None):
@@ -848,12 +789,10 @@ class App:
         if not text or text == PLACEHOLDER:
             return
         self.entry.delete(0, tk.END)
+        self.canvas.itemconfig(self.entry_win, state="hidden")
         threading.Thread(target=self.voice.process_typed, args=(text,), daemon=True).start()
 
-    def toggle_mute(self):
-        self.voice.muted = not self.voice.muted
-
-    # ---- voice thread se aaye messages
+    # ---- voice thread / tray se aaye messages
     def poll(self):
         while True:
             try:
@@ -871,60 +810,146 @@ class App:
                 self.convo_until = time.time() + 10
             elif kind == "pulse":
                 self.r.ring = 0.0
+            elif kind == "cmd":
+                if val == "pin":
+                    self.pinned = not self.pinned
+                elif val == "mute":
+                    self.toggle_mute()
+                elif val == "startup":
+                    self.toggle_startup()
+                elif val == "quit":
+                    self.close()
+                    return
             elif kind == "quit":
                 self.root.after(900, self.close)
 
+    # ---- bubble
     @staticmethod
     def _cut(s, n):
         return s if len(s) <= n else s[:n - 1] + "…"
 
-    def texts(self):
-        muted = self.voice.muted
-        if muted:
-            return "Mic is muted", "Tap the mic button to unmute", True
-        convo = time.time() < self.convo_until and bool(self.heard)
-        said = "“" + self._cut(self.heard, 42) + "”" if convo else DEFAULT_TITLE
+    def bubble_texts(self):
+        if self.voice.muted or self.canvas.itemcget(self.entry_win, "state") == "normal":
+            return None
+        convo = time.time() < self.convo_until
+        heard = "“" + self._cut(self.heard, 44) + "”" if (convo and self.heard) else ""
         reply = self._cut(self.reply, 80)
         if self.state == "thinking":
-            return said, "Thinking…", False
-        if self.state == "speaking":
-            return said, reply, False
-        if convo:
-            return said, reply, False
+            return heard, "Thinking…"
+        if convo or self.state == "speaking":
+            if heard or reply:
+                return heard, reply or "…"
         if self.state == "listening":
-            return "I'm listening…", "How can I help you today?", False
-        return DEFAULT_TITLE, "Say “Hey Ana” to wake me up", False
+            return "", "Listening…"
+        return None
 
-    def update_texts(self):
-        cur = self.texts()
-        if cur == self._shown:
+    def update_bubble(self):
+        texts = self.bubble_texts()
+        if texts == self._bubble_shown:
             return
-        self._shown = cur
-        title, sub, muted = cur
-        self.canvas.itemconfig(self.title_id, text=title)
-        self.canvas.itemconfig(self.sub_id, text=sub)
-        self.canvas.itemconfig(self.dot, fill="#ef4444" if muted else "#22c55e")
-        self.canvas.itemconfig(self.pill_txt, text="Muted" if muted else "Online")
+        self._bubble_shown = texts
+        c = self.canvas
+        if texts is None:
+            for i in (self.bubble, self.heard_id, self.reply_id):
+                c.itemconfig(i, state="hidden")
+            return
+        heard, reply = texts
+        c.itemconfig(self.reply_id, text=reply, state="normal")
+        c.coords(self.reply_id, W / 2, 100)
+        bb = c.bbox(self.reply_id) or (W / 2 - 40, 80, W / 2 + 40, 100)
+        left, top, right, bottom = bb
+        if heard:
+            c.itemconfig(self.heard_id, text=heard, state="normal")
+            c.coords(self.heard_id, W / 2, top - 3)
+            b2 = c.bbox(self.heard_id) or (left, top - 16, right, top - 3)
+            left, top, right = min(left, b2[0]), b2[1], max(right, b2[2])
+        else:
+            c.itemconfig(self.heard_id, state="hidden")
+        pad, r = 12, 16
+        x1, y1, x2, y2 = left - pad, top - pad + 2, right + pad, bottom + pad - 2
+        c.coords(self.bubble, x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
+                 x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1)
+        c.itemconfig(self.bubble, state="normal")
+        c.tag_raise(self.heard_id)
+        c.tag_raise(self.reply_id)
+
+    # ---- dikhana / chhupana
+    def wants_visible(self):
+        if not self.can_hide or self.pinned or self.voice.muted:
+            return True
+        if self.state != "sleeping" or time.time() < self.convo_until:
+            return True
+        return self.canvas.itemcget(self.entry_win, "state") == "normal"
+
+    def show(self):
+        if self.hidden:
+            self.hidden = False
+            self.root.deiconify()
+            self.root.attributes("-topmost", self.topmost.get())
+            self.root.lift()
+        self.last_wanted = time.time()
+
+    def hide(self):
+        self.hidden = True
+        self.root.withdraw()
 
     def tick(self):
         t0 = time.time()
-        dt = min(0.1, t0 - self.last)
-        self.last = t0
-        self.poll()
-        want_bars = self.canvas.itemcget(self.entry_win, "state") != "normal"
-        orb, bars, mic = self.r.render(self.state, dt, self.voice.muted, want_bars)
-        self.p_orb.paste(orb)
-        if bars is not None:
-            self.p_bars.paste(bars)
-        self.p_mic.paste(mic)
-        self.update_texts()
-        spent = int((time.time() - t0) * 1000)
-        self.root.after(max(1, 33 - spent), self.tick)
+        delay = 33
+        try:
+            dt = min(0.1, t0 - self.last)
+            self.last = t0
+            self.poll()
+            if self.wants_visible():
+                self.show()
+            elif not self.hidden and t0 - self.last_wanted > 1.6:
+                self.hide()
+            if self.hidden:
+                delay = 120
+            else:
+                self.p_orb.paste(self.r.render(self.state, dt, self.voice.muted))
+                self.update_bubble()
+                delay = max(1, 33 - int((time.time() - t0) * 1000))
+        except tk.TclError:
+            return                                   # window band ho chuki hai
+        except Exception:
+            traceback.print_exc()
+        self.root.after(delay, self.tick)
 
     def run(self):
         self.root.mainloop()
 
 
-if __name__ == "__main__":
+def main():
+    if "--install-startup" in sys.argv:
+        if install_startup():
+            launch_detached()
+            print("Ho gaya! Ana abhi background mein chalu ho gayi hai,")
+            print("aur ab har baar laptop on hote hi apne aap chalu hogi.")
+            print("Band karne ke liye: tray icon -> Quit Ana")
+        else:
+            print("Ye option sirf Windows pe hai.")
+        return
+    if "--remove-startup" in sys.argv:
+        remove_startup()
+        print("Startup hata diya. Ab Ana apne aap nahi chalegi.")
+        return
+
+    if sys.stdout is None or sys.stderr is None:      # pythonw: console nahi, to log file
+        log = open(os.path.join(os.path.expanduser("~"), "ana.log"), "a", buffering=1, encoding="utf-8")
+        sys.stdout = sys.stderr = log
+
+    lock = acquire_lock()
+    if lock is None:
+        print("Ana pehle se chal rahi hai.")
+        return
+
     pyautogui.FAILSAFE = True   # mouse ko corner mein le jao to automation ruk jayega
-    App().run()
+    app = App(quiet="--quiet" in sys.argv)
+    app.can_hide = HIDE_WHEN_SLEEPING and start_tray(app)
+    app.run()
+    lock.close()
+
+
+if __name__ == "__main__":
+    main()
