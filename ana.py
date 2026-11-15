@@ -36,7 +36,12 @@ ASSISTANT_NAME = "Anna"
 # Mic "ana" ko aksar alag sunta hai (anna, aana...). Bina bulaye chalne lage
 # to is list se extra naam hata do.
 WAKE_WORDS = ["ana", "anna", "aana", "anaa", "anah", "ena", "enna", "ann", "anne", "annie",
-              "hana", "hanna", "hannah", "heyana", "heyanna", "heyhanna"]
+              "hana", "hanna", "hannah", "heyana", "heyanna", "heyhanna",
+              "haina", "hena", "heyna", "hayna", "hainaa", "अना", "अन्ना", "एना", "हैना"]
+# Google "Hey Anna" ko aksar do lafz mein likhta hai ("hai na", "hey na"). Ye dono-lafz wale bhi wake karte hain.
+# (Hindi "hai na" bolne par bhi jag jaayegi. Iski jagah sirf "hey anna" chahiye to is list se hata do.)
+WAKE_PHRASES = {("hai", "na"), ("hay", "na"), ("hey", "na"), ("he", "na"), ("hi", "na"), ("hain", "na"),
+                ("ae", "na"), ("है", "ना"), ("हे", "ना"), ("हाय", "ना"), ("हैं", "ना")}
 # in ke alawa milte-julte lafz (hannah, anah...) bhi pakad liye jaate hain. Ye lafz kabhi wake nahi karte:
 NOT_WAKE = {"and", "an", "any", "anal", "can", "man", "hand", "nana", "banana", "gana", "han"}
 MIC_INDEX = None            # galat mic chuna ho to: python ana.py --test-mic se number dekho aur yahan likho
@@ -114,8 +119,11 @@ def is_wake_word(w):
 
 def split_wake_word(text):
     """Wake word mila to (True, uske baad ka command), warna (False, text)."""
-    words = re.findall(r"[\w']+", text.lower())
+    words = [w.strip(".,!?;:'\"“”-") for w in text.lower().split()]
+    words = [w for w in words if w]
     for i, w in enumerate(words):
+        if i + 1 < len(words) and (w, words[i + 1]) in WAKE_PHRASES:
+            return True, " ".join(words[i + 2:])
         if is_wake_word(w):
             return True, " ".join(words[i + 1:])
     return False, text
