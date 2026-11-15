@@ -7,6 +7,7 @@ Ya neeche text box mein command type karo.
 """
 
 import datetime
+import difflib
 import math
 import os
 import platform
@@ -32,8 +33,12 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 ASSISTANT_NAME = "Anna"
 # Mic "ana" ko aksar alag sunta hai (anna, aana...). Bina bulaye chalne lage
 # to is list se extra naam hata do.
-WAKE_WORDS = ["ana", "anna", "aana", "anaa", "anah", "ena", "ann",
-              "heyana", "heyanna"]
+WAKE_WORDS = ["ana", "anna", "aana", "anaa", "anah", "ena", "enna", "ann", "anne", "annie",
+              "hana", "hanna", "hannah", "heyana", "heyanna", "heyhanna"]
+# in ke alawa milte-julte lafz (hannah, anah...) bhi pakad liye jaate hain. Ye lafz kabhi wake nahi karte:
+NOT_WAKE = {"and", "an", "any", "anal", "can", "man", "hand", "nana", "banana", "gana", "han"}
+MIC_INDEX = None            # galat mic chuna ho to: python ana.py --test-mic se number dekho aur yahan likho
+DEBUG_SHOW_HEARD = True     # True: so rahi ho tab bhi jo suna wo dikhata hai. Sab theek chale to False kar do
 LANGUAGE = "en-IN"          # Hinglish ke liye best chalta hai
 FOLLOWUP_SECONDS = 15       # wake ke baad itni der tak bina "Hey Anna" bole sunta rahega
 OS = platform.system()      # Windows / Darwin / Linux
@@ -76,11 +81,20 @@ JOKES = [
 
 
 # ----------------------------------------------------------------- actions --
+def is_wake_word(w):
+    """Exact list ya 'anna' se milta-julta lafz (Google mic ke bigde spelling ke liye)."""
+    if w in WAKE_WORDS:
+        return True
+    if w in NOT_WAKE or len(w) < 3:
+        return False
+    return difflib.SequenceMatcher(None, w, "anna").ratio() >= 0.74
+
+
 def split_wake_word(text):
     """Wake word mila to (True, uske baad ka command), warna (False, text)."""
     words = re.findall(r"[\w']+", text.lower())
     for i, w in enumerate(words):
-        if w in WAKE_WORDS:
+        if is_wake_word(w):
             return True, " ".join(words[i + 1:])
     return False, text
 
@@ -281,8 +295,12 @@ class Voice:
         try:
             return self.rec.recognize_google(audio, language=LANGUAGE).lower()
         except sr.UnknownValueError:
+            print("[mic] awaaz aayi par samajh nahi aayi", flush=True)
+            if DEBUG_SHOW_HEARD:
+                self.q.put(("debug", "(awaaz aayi par samajh nahi aayi)"))
             return None
-        except sr.RequestError:
+        except sr.RequestError as e:
+            print("[mic] Google speech service nahi mili:", e, flush=True)
             self.q.put(("reply", "Internet check karo, speech service nahi chal rahi"))
             return None
 
@@ -314,12 +332,14 @@ class Voice:
 
     def loop(self):
         try:
-            mic = sr.Microphone()
+            mic = sr.Microphone(device_index=MIC_INDEX)
         except Exception as e:
+            print("[mic] Mic nahi mila:", e, flush=True)
             self.q.put(("reply", f"Mic nahi mila: {e}"))
             return
         with mic as src:
             self.rec.adjust_for_ambient_noise(src, duration=1)
+        print(f"[mic] chalu. energy_threshold={self.rec.energy_threshold:.0f}", flush=True)
         if not self.quiet:
             self.speak(f"{ASSISTANT_NAME} ready hai. Hey Anna bolkar jagao")
 
@@ -337,7 +357,10 @@ class Voice:
                 continue
 
             woke, cmd = split_wake_word(text)
+            print(f"[heard] {text!r}  wake={woke}  awake={self.is_awake()}", flush=True)
             if not woke and not self.is_awake():
+                if DEBUG_SHOW_HEARD:
+                    self.q.put(("debug", text))
                 continue                      # so rahi hai, ye bakwaas ignore
 
             self.q.put(("heard", text))
@@ -833,6 +856,10 @@ class App:
             elif kind == "reply":
                 self.reply = val
                 self.convo_until = time.time() + 10
+            elif kind == "debug":
+                self.heard = val
+                self.reply = "Wake word nahi mila. “Hey Anna” bolo"
+                self.convo_until = time.time() + 3
             elif kind == "pulse":
                 self.r.ring = 0.0
             elif kind == "cmd":
@@ -945,7 +972,42 @@ class App:
         self.root.mainloop()
 
 
+def test_mic():
+    """python ana.py --test-mic : mic aur wake word ki jaanch."""
+    print("Microphones:")
+    for i, n in enumerate(sr.Microphone.list_microphone_names()):
+        print(f"  [{i}] {n}")
+    rec = sr.Recognizer()
+    mic = sr.Microphone(device_index=MIC_INDEX)
+    print("\nEk second chup raho (noise check)...")
+    with mic as src:
+        rec.adjust_for_ambient_noise(src, duration=1)
+    print(f"Energy threshold: {rec.energy_threshold:.0f}")
+    print("\nAb 8 baar bolo: 'Hey Anna' ya kuch bhi. (Ctrl+C se band)\n")
+    for _ in range(8):
+        print("Sun rahi hoon...")
+        try:
+            with mic as src:
+                audio = rec.listen(src, timeout=6, phrase_time_limit=5)
+        except sr.WaitTimeoutError:
+            print("  -> kuch nahi suna (mic ki awaaz kam hai ya galat mic chuna hai)")
+            continue
+        try:
+            text = rec.recognize_google(audio, language=LANGUAGE).lower()
+        except sr.UnknownValueError:
+            print("  -> awaaz aayi par samajh nahi aayi")
+            continue
+        except sr.RequestError as e:
+            print("  -> Google speech service nahi mili (internet check karo):", e)
+            return
+        woke, rest = split_wake_word(text)
+        print(f"  -> suna: {text!r}   wake word: {'HAAN' if woke else 'NAHI'}")
+
+
 def main():
+    if "--test-mic" in sys.argv:
+        test_mic()
+        return
     if "--install-startup" in sys.argv:
         if install_startup():
             launch_detached()
@@ -966,7 +1028,8 @@ def main():
 
     lock = acquire_lock()
     if lock is None:
-        print("Anna pehle se chal rahi hai.")
+        print("Anna pehle se chal rahi hai. (Band karne ke liye: tray icon -> Quit Anna,")
+        print("ya Task Manager mein pythonw.exe ko End task karo.)")
         return
 
     pyautogui.FAILSAFE = True   # mouse ko corner mein le jao to automation ruk jayega
