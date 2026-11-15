@@ -6,8 +6,10 @@ Jagane ke liye bolo:  "Hey Anna"  (ya sirf "Anna")
 Ya neeche text box mein command type karo.
 """
 
+import array
 import datetime
 import difflib
+import json
 import math
 import os
 import platform
@@ -42,6 +44,26 @@ DEBUG_SHOW_HEARD = True     # True: so rahi ho tab bhi jo suna wo dikhata hai. S
 LANGUAGE = "en-IN"          # Hinglish ke liye best chalta hai
 FOLLOWUP_SECONDS = 15       # wake ke baad itni der tak bina "Hey Anna" bole sunta rahega
 OS = platform.system()      # Windows / Darwin / Linux
+
+# --pick-mic se chuna hua mic yahan save hota hai (har baar file edit nahi karni padegi)
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".anna_config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(cfg):
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+
+
+if load_config().get("mic_index") is not None:
+    MIC_INDEX = load_config()["mic_index"]
 
 SITES = {
     "youtube": "https://www.youtube.com",
@@ -285,7 +307,12 @@ class Voice:
             self.q.put(("state", self.idle_state()))
 
     # ---- listening
+    def clamp_threshold(self):
+        """Sensitivity apne aap bahut oonchi na ho jaaye, warna awaaz sunayi hi nahi deti."""
+        self.rec.energy_threshold = max(120, min(self.rec.energy_threshold, 900))
+
     def listen_once(self, mic, timeout, limit):
+        self.clamp_threshold()
         try:
             audio = self.rec.listen(mic, timeout=timeout, phrase_time_limit=limit)
         except sr.WaitTimeoutError:
@@ -334,11 +361,16 @@ class Voice:
         try:
             mic = sr.Microphone(device_index=MIC_INDEX)
         except Exception as e:
-            print("[mic] Mic nahi mila:", e, flush=True)
-            self.q.put(("reply", f"Mic nahi mila: {e}"))
-            return
+            print(f"[mic] mic {MIC_INDEX} nahi khula ({e}), default try kar rahi hoon", flush=True)
+            try:
+                mic = sr.Microphone()
+            except Exception as e2:
+                print("[mic] Mic nahi mila:", e2, flush=True)
+                self.q.put(("reply", "Mic nahi mila. python ana.py --pick-mic chalao"))
+                return
         with mic as src:
             self.rec.adjust_for_ambient_noise(src, duration=1)
+        self.clamp_threshold()
         print(f"[mic] chalu. energy_threshold={self.rec.energy_threshold:.0f}", flush=True)
         if not self.quiet:
             self.speak(f"{ASSISTANT_NAME} ready hai. Hey Anna bolkar jagao")
@@ -972,6 +1004,64 @@ class App:
         self.root.mainloop()
 
 
+def rms_level(data):
+    a = array.array("h")
+    a.frombytes(data[: len(data) // 2 * 2])
+    if not a:
+        return 0.0
+    return math.sqrt(sum(x * x for x in a) / len(a))
+
+
+def pick_mic():
+    """python ana.py --pick-mic : har mic ko sunke sabse sahi wala dhoondho aur save karo."""
+    import pyaudio
+    pa = pyaudio.PyAudio()
+    cands = []
+    for i in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(i)
+        if info.get("maxInputChannels", 0) > 0:
+            cands.append((i, info["name"], int(info["defaultSampleRate"])))
+    if not cands:
+        print("Koi mic mila hi nahi! Windows Settings -> System -> Sound -> Input mein mic check karo.")
+        return
+    print(f"{len(cands)} mic mile. Ab har mic 2 second sunega.")
+    print(">>> Is poore time LAGATAR zor se bolte raho, jaise: 'one two three four five' <<<\n")
+    time.sleep(2)
+    results = []
+    for i, name, rate in cands:
+        print(f"[{i:>2}] {name[:44]:<44}", end=" ", flush=True)
+        try:
+            st = pa.open(format=pyaudio.paInt16, channels=1, rate=rate, input=True,
+                         input_device_index=i, frames_per_buffer=1024)
+            peak, end = 0.0, time.time() + 2
+            while time.time() < end:
+                peak = max(peak, rms_level(st.read(1024, exception_on_overflow=False)))
+            st.close()
+        except Exception:
+            print("-> khul nahi paya")
+            continue
+        print("#" * min(36, int(peak / 100)) + f"  ({int(peak)})")
+        results.append((peak, i, name))
+    pa.terminate()
+    good = [r for r in results if not any(k in r[2].lower() for k in ("stereo mix", "loopback", "what u hear"))]
+    if not good or max(good)[0] < 150:
+        print("\nKoi bhi mic awaaz nahi pakad paya. Ye karo:")
+        print("1) Windows Settings -> Privacy & security -> Microphone -> 'Let desktop apps access your microphone' ON")
+        print("2) Settings -> System -> Sound -> Input mein sahi mic chuno aur uski Volume badhao")
+        print("3) Phir ye command dobara chalao.")
+        return
+    peak, best, name = max(good)
+    print(f"\nSabse zyada awaaz: [{best}] {name}")
+    ans = input("Isko Anna ke liye save karun? (Enter = haan, ya koi aur number likho, n = nahi): ").strip().lower()
+    if ans in ("n", "no"):
+        return
+    idx = int(ans) if ans.isdigit() else best
+    cfg = load_config()
+    cfg["mic_index"] = idx
+    save_config(cfg)
+    print(f"Save ho gaya: mic [{idx}]. Ab Anna band karke dobara chalao (ya python ana.py --install-startup).")
+
+
 def test_mic():
     """python ana.py --test-mic : mic aur wake word ki jaanch."""
     print("Microphones:")
@@ -1007,6 +1097,9 @@ def test_mic():
 def main():
     if "--test-mic" in sys.argv:
         test_mic()
+        return
+    if "--pick-mic" in sys.argv:
+        pick_mic()
         return
     if "--install-startup" in sys.argv:
         if install_startup():
