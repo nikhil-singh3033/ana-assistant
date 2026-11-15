@@ -426,8 +426,8 @@ KEY = (1, 1, 1)                 # window ka transparent rang
 KEY_HEX = "#010101"
 W, H = 340, 240
 ORB_R, ORB_S = 38, 150          # orb ka radius aur uska region
-ORB_C = (W // 2, H - ORB_S // 2 - 6)
-BUBBLE_BOTTOM = 112             # text bubble ka neeche ka kinara (orb ke upar)
+ORB_C = (W // 2, 54)            # orb window ke upar hai, text bubble uske neeche aata hai
+SCREEN_POS = "top"              # "top": screen ke upar-beech (camera ke paas, Siri jaisa) | "bottom-right"
 BUBBLE_FILL, BUBBLE_EDGE = "#0c0f1d", "#2b3354"
 
 C_CYAN = (34, 211, 238)
@@ -510,13 +510,20 @@ class Renderer:
         self.key = Image.new("RGB", (S, S), KEY)
         self.sphere_mask = disc_mask((S, S), c, c, R)
 
-        # gola: beech gehra kaala, kinare par halka neela (glass jaisa)
-        body = Image.composite(Image.new("RGB", (S, S), (11, 18, 40)),
-                               Image.new("RGB", (S, S), (3, 5, 13)), radial_L(R, S, power=1.7))
-        sheen = Image.new("L", (S, S), 0)
-        ImageDraw.Draw(sheen).ellipse([c - 0.80 * R, c - 0.95 * R, c + 0.55 * R, c - 0.05 * R], fill=34)
-        sheen = sheen.filter(ImageFilter.GaussianBlur(7))
-        self.body = ImageChops.screen(body, tint(sheen, (70, 110, 190), (S, S)))
+        # 3D gola: roshni upar-left se aati hai, neeche-right gehra (glass ball jaisa)
+        lit = ImageChops.offset(radial_L(int(R * 1.5), S, power=1.3, invert=True),
+                                -int(R * 0.30), -int(R * 0.34))
+        body = Image.composite(Image.new("RGB", (S, S), (17, 29, 62)),
+                               Image.new("RGB", (S, S), (2, 3, 9)), lit)
+        edge = lut_scale(radial_L(R, S, power=2.2), 0.50)               # kinare par halka neela (fresnel)
+        self.body = ImageChops.screen(body, tint(edge, (18, 32, 76), (S, S)))
+        # glossy highlight (specular) upar-left mein, aur neeche halki warm bounce roshni
+        spec = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(spec).ellipse([c - 0.58 * R, c - 0.70 * R, c - 0.14 * R, c - 0.38 * R], fill=255)
+        self.spec = spec.filter(ImageFilter.GaussianBlur(3.0))
+        bounce = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(bounce).ellipse([c - 0.40 * R, c + 0.62 * R, c + 0.40 * R, c + 1.00 * R], fill=255)
+        self.bounce = bounce.filter(ImageFilter.GaussianBlur(4.0))
 
         # patli double rim (image jaisi do line wali kinari)
         outer = ImageChops.subtract(disc_mask((S, S), c, c, R), disc_mask((S, S), c, c, R - 1.3))
@@ -576,6 +583,12 @@ class Renderer:
         base = ImageChops.screen(base, tint(lut_scale(self.core, inner_k), cur["ctop"], (S, S)))
         base = ImageChops.screen(base, tint(self.ring_in, cur["ctop"], (S, S)))
 
+        # 3D chamak: highlight halka sa tairta hai, bounce neeche se
+        dx, dy = int(round(1.6 * math.sin(self.t * 0.7))), int(round(1.2 * math.cos(self.t * 0.9)))
+        spec = ImageChops.offset(self.spec, dx, dy)
+        base = ImageChops.screen(base, tint(lut_scale(spec, 0.10 + 0.20 * cur["top"]), (200, 222, 255), (S, S)))
+        base = ImageChops.screen(base, tint(lut_scale(self.bounce, 0.16 * cur["bot"]), cur["cbot"], (S, S)))
+
         bg = self.key.copy()
         # 2) gola
         bg.paste(base, (0, 0), self.sphere_mask)
@@ -606,15 +619,18 @@ class Renderer:
     def render(self, state, dt, muted):
         self._blend_state("muted" if muted else state, dt)
         orb = self.render_orb()
-        sc = self.cur["scale"]
-        if abs(sc - 1) > 0.01:                          # so rahi ho to chhota orb
-            n = max(8, int(ORB_S * sc))
-            small = orb.resize((n, n), LANCZOS)
-            out = self.key.copy()
-            off = (ORB_S - n) // 2
-            out.paste(small, (off, off))
-            return out
-        return orb
+        # halka saans jaisa size badalna; bolte waqt zyada dhadakta hai
+        pulse = 0.02 * math.sin(self.t * 1.6)
+        if self.cur["sway"] > 5:
+            pulse += 0.045 * (0.5 + 0.5 * math.sin(self.t * 6.0))
+        n = max(8, int(ORB_S * self.cur["scale"] * (1 + pulse)))
+        if n == ORB_S:
+            return orb
+        small = orb.resize((n, n), LANCZOS)
+        out = self.key.copy()
+        off = (ORB_S - n) // 2
+        out.paste(small, (off, off))
+        return out
 
     def tray_icon(self):
         self.cur.update(scale=1.0)
@@ -729,7 +745,10 @@ class App:
         self.root.overrideredirect(True)            # bina title bar ke
         self.root.attributes("-topmost", True)
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry(f"{W}x{H}+{sw - W - 24}+{max(10, sh - H - 70)}")
+        if SCREEN_POS == "top":
+            self.root.geometry(f"{W}x{H}+{(sw - W) // 2}+0")          # camera ke bilkul neeche
+        else:
+            self.root.geometry(f"{W}x{H}+{sw - W - 24}+{max(10, sh - H - 70)}")
         self.root.configure(bg=KEY_HEX)
         try:
             self.root.attributes("-transparentcolor", KEY_HEX)   # orb ke bahar sab transparent (Windows)
@@ -746,9 +765,9 @@ class App:
         # caption bubble (jo bola + Anna ka jawab)
         self.bubble = c.create_polygon(0, 0, 0, 0, 0, 0, smooth=True, fill=BUBBLE_FILL,
                                        outline=BUBBLE_EDGE, width=1, state="hidden")
-        self.heard_id = c.create_text(W / 2, 90, text="", anchor="s", fill="#8a90a2", width=300,
+        self.heard_id = c.create_text(W / 2, 110, text="", anchor="n", fill="#8a90a2", width=300,
                                       justify="center", font=("Segoe UI", 10, "italic"), state="hidden")
-        self.reply_id = c.create_text(W / 2, 100, text="", anchor="s", fill="#f3f4f6", width=300,
+        self.reply_id = c.create_text(W / 2, 110, text="", anchor="n", fill="#f3f4f6", width=300,
                                       justify="center", font=("Segoe UI", 12), state="hidden")
         self._bubble_shown = None
 
@@ -762,7 +781,7 @@ class App:
         self.entry.bind("<Button-1>", lambda e: self.entry.focus_force())
         self.entry.bind("<Return>", self.submit_text)
         self.entry.bind("<Escape>", lambda e: self.toggle_entry())
-        self.entry_win = c.create_window(W / 2, 96, window=self.entry, width=290, height=36, state="hidden")
+        self.entry_win = c.create_window(W / 2, ORB_C[1] + ORB_R + 30, window=self.entry, width=290, height=36, state="hidden")
 
         self.menu = tk.Menu(self.root, tearoff=0, bg="#0e1220", fg="#e5e7eb", bd=0,
                             activebackground="#1d2540", activeforeground="#ffffff")
@@ -946,17 +965,23 @@ class App:
                 c.itemconfig(i, state="hidden")
             return
         heard, reply = texts
-        c.itemconfig(self.reply_id, text=reply, state="normal")
-        c.coords(self.reply_id, W / 2, 100)
-        bb = c.bbox(self.reply_id) or (W / 2 - 40, 80, W / 2 + 40, 100)
-        left, top, right, bottom = bb
+        y = ORB_C[1] + ORB_R + 14
+        top = left = right = None
         if heard:
             c.itemconfig(self.heard_id, text=heard, state="normal")
-            c.coords(self.heard_id, W / 2, top - 3)
-            b2 = c.bbox(self.heard_id) or (left, top - 16, right, top - 3)
-            left, top, right = min(left, b2[0]), b2[1], max(right, b2[2])
+            c.coords(self.heard_id, W / 2, y)
+            b1 = c.bbox(self.heard_id) or (W / 2 - 40, y, W / 2 + 40, y + 16)
+            left, top, right, y = b1[0], b1[1], b1[2], b1[3] + 4
         else:
             c.itemconfig(self.heard_id, state="hidden")
+        c.itemconfig(self.reply_id, text=reply, state="normal")
+        c.coords(self.reply_id, W / 2, y)
+        b2 = c.bbox(self.reply_id) or (W / 2 - 40, y, W / 2 + 40, y + 20)
+        if top is None:
+            left, top, right = b2[0], b2[1], b2[2]
+        else:
+            left, right = min(left, b2[0]), max(right, b2[2])
+        bottom = b2[3]
         pad, r = 12, 16
         x1, y1, x2, y2 = left - pad, top - pad + 2, right + pad, bottom + pad - 2
         c.coords(self.bubble, x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
