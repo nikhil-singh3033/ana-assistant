@@ -2,7 +2,7 @@
 ANA - Laptop Voice Assistant (floating Siri-style UI)
 
 Run:  python ana.py      (ek baar: python ana.py --install-startup  -> laptop on hote hi apne aap chalegi)
-Jagane ke liye bolo:  "Hey Ana"  (ya sirf "Ana")
+Jagane ke liye bolo:  "Hey Anna"  (ya sirf "Anna")
 Ya neeche text box mein command type karo.
 """
 
@@ -29,13 +29,13 @@ import pyttsx3
 import speech_recognition as sr
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-ASSISTANT_NAME = "Ana"
+ASSISTANT_NAME = "Anna"
 # Mic "ana" ko aksar alag sunta hai (anna, aana...). Bina bulaye chalne lage
 # to is list se extra naam hata do.
 WAKE_WORDS = ["ana", "anna", "aana", "anaa", "anah", "ena", "ann",
               "heyana", "heyanna"]
 LANGUAGE = "en-IN"          # Hinglish ke liye best chalta hai
-FOLLOWUP_SECONDS = 15       # wake ke baad itni der tak bina "Hey Ana" bole sunta rahega
+FOLLOWUP_SECONDS = 15       # wake ke baad itni der tak bina "Hey Anna" bole sunta rahega
 OS = platform.system()      # Windows / Darwin / Linux
 
 SITES = {
@@ -143,7 +143,7 @@ def handle(cmd, assistant):
 
     if any(w in c for w in ("so ja", "go to sleep", "sleep mode", "chup ho ja", "rest kar")):
         assistant.force_sleep = True
-        return "Theek hai, jab zaroorat ho to Hey Ana bolna"
+        return "Theek hai, jab zaroorat ho to Hey Anna bolna"
 
     if any(w in c for w in ("exit", "quit", "band ho ja", "bye", "alvida")):
         return "EXIT"
@@ -258,7 +258,7 @@ class Voice:
             try:
                 engine = pyttsx3.init()      # har baar naya engine = thread-safe
                 engine.setProperty("rate", 175)
-                # Ana ke liye female awaaz chuno agar available ho (Windows pe Zira/Heera)
+                # Anna ke liye female awaaz chuno agar available ho (Windows pe Zira/Heera)
                 for v in engine.getProperty("voices"):
                     if any(k in v.name.lower() for k in ("zira", "heera", "female", "hazel")):
                         engine.setProperty("voice", v.id)
@@ -321,7 +321,7 @@ class Voice:
         with mic as src:
             self.rec.adjust_for_ambient_noise(src, duration=1)
         if not self.quiet:
-            self.speak(f"{ASSISTANT_NAME} ready hai. Hey Ana bolkar jagao")
+            self.speak(f"{ASSISTANT_NAME} ready hai. Hey Anna bolkar jagao")
 
         while self.running:
             if self.muted:
@@ -362,7 +362,7 @@ HIDE_WHEN_SLEEPING = True       # True: so rahi ho to orb chhup jata hai (tray i
 KEY = (1, 1, 1)                 # window ka transparent rang
 KEY_HEX = "#010101"
 W, H = 340, 240
-ORB_R, ORB_S = 36, 150          # orb ka radius aur uska region
+ORB_R, ORB_S = 38, 150          # orb ka radius aur uska region
 ORB_C = (W // 2, H - ORB_S // 2 - 6)
 BUBBLE_BOTTOM = 112             # text bubble ka neeche ka kinara (orb ke upar)
 BUBBLE_FILL, BUBBLE_EDGE = "#0c0f1d", "#2b3354"
@@ -374,16 +374,16 @@ C_PURPLE = (168, 85, 247)
 C_MAGENTA = (217, 70, 239)
 C_PINK = (244, 63, 140)
 
-# state ke hisaab se petal-groups ke rang, roshni, speed, size
+# state ke hisaab se rim ki roshni, rang, ghoomna aur size
+BLUE = (110, 170, 255)
+WARM = (255, 178, 100)
 PAL = {
-    "sleeping":  dict(c=(C_CYAN, C_PINK, C_PURPLE), inten=0.55, pulse=0.03, speed=0.35, scale=0.72),
-    "listening": dict(c=(C_CYAN, C_PINK, C_PURPLE), inten=0.95, pulse=0.10, speed=1.00, scale=1.00),
-    "thinking":  dict(c=(C_PURPLE, C_BLUE, C_CYAN), inten=0.90, pulse=0.06, speed=2.60, scale=1.00),
-    "speaking":  dict(c=(C_PINK, C_CYAN, C_PURPLE), inten=1.00, pulse=0.28, speed=1.50, scale=1.00),
-    "muted":     dict(c=((107, 114, 128), (75, 85, 99), (55, 65, 81)), inten=0.35, pulse=0.0,
-                      speed=0.15, scale=0.72),
+    "sleeping":  dict(top=0.55, bot=0.35, glow=0.35, inner=0.00, spin=0,   sway=0,  scale=0.72, ctop=BLUE, cbot=WARM),
+    "listening": dict(top=1.00, bot=0.65, glow=0.80, inner=0.22, spin=0,   sway=0,  scale=1.00, ctop=BLUE, cbot=WARM),
+    "thinking":  dict(top=1.00, bot=0.50, glow=0.80, inner=0.26, spin=230, sway=0,  scale=1.00, ctop=(150, 130, 255), cbot=WARM),
+    "speaking":  dict(top=1.00, bot=0.75, glow=1.00, inner=0.50, spin=0,   sway=14, scale=1.00, ctop=(90, 200, 255), cbot=WARM),
+    "muted":     dict(top=0.30, bot=0.15, glow=0.10, inner=0.00, spin=0,   sway=0,  scale=0.72, ctop=(120, 126, 140), cbot=(110, 112, 120)),
 }
-OMEGA = (0.9, -0.7, 0.45)       # har group kitni tezi se ghoomta hai
 
 
 def lerp3(a, b, t):
@@ -428,49 +428,71 @@ def lut_scale(img, k):
     return img.point([min(255, int(v * k)) for v in range(256)])
 
 
+def cut(img, k=1.0, off=7):
+    """Mask ki bahut halki tail ko 0 kar do (warna transparent window pe kaala daag dikhta hai)."""
+    return img.point([max(0, min(255, int((v - off) * k))) for v in range(256)])
+
+
 def tint(mask, color, size):
     """L mask ko rang ke saath RGB layer banao (mask ke bahar kaala)."""
     return Image.composite(Image.new("RGB", size, ci(color)), Image.new("RGB", size, (0, 0, 0)), mask)
 
 
 class Renderer:
+    """Dark glass orb: kaala chamakdaar gola, upar neeli glow wali rim, neeche halki sunehri kinari."""
+
     def __init__(self):
         S, R = ORB_S, ORB_R
         c = S / 2
         self.key = Image.new("RGB", (S, S), KEY)
-        self.black = Image.new("RGB", (S, S), (0, 0, 0))
         self.sphere_mask = disc_mask((S, S), c, c, R)
 
-        base_c = Image.new("RGB", (S, S), (2, 4, 16))
-        base_e = Image.new("RGB", (S, S), (6, 22, 54))
-        self.sphere_base = Image.composite(base_e, base_c, radial_L(R, S, power=1.7))
-        og = corner_gradient((S, S), C_SKY, C_MAGENTA, C_CYAN, C_PINK)
-        rim_soft = Image.composite(og, self.black, lut_scale(radial_L(R, S, power=6.5), 0.55))
-        ring_m = ImageChops.subtract(disc_mask((S, S), c, c, R), disc_mask((S, S), c, c, R - 1.7))
-        rim_ring = Image.composite(og, self.black, ring_m)
-        hl = Image.new("L", (S, S), 0)
-        ImageDraw.Draw(hl).ellipse([c - 0.72 * R, c - 0.82 * R, c - 0.05 * R, c - 0.30 * R], fill=42)
-        hl = hl.filter(ImageFilter.GaussianBlur(3.5))
-        self.rim = ImageChops.screen(ImageChops.screen(rim_soft, rim_ring),
-                                     Image.composite(Image.new("RGB", (S, S), (200, 230, 255)), self.black, hl))
-        self.center_mask = radial_L(int(R * 0.52), S, power=1.8, invert=True)
+        # gola: beech gehra kaala, kinare par halka neela (glass jaisa)
+        body = Image.composite(Image.new("RGB", (S, S), (11, 18, 40)),
+                               Image.new("RGB", (S, S), (3, 5, 13)), radial_L(R, S, power=1.7))
+        sheen = Image.new("L", (S, S), 0)
+        ImageDraw.Draw(sheen).ellipse([c - 0.80 * R, c - 0.95 * R, c + 0.55 * R, c - 0.05 * R], fill=34)
+        sheen = sheen.filter(ImageFilter.GaussianBlur(7))
+        self.body = ImageChops.screen(body, tint(sheen, (70, 110, 190), (S, S)))
+
+        # patli double rim (image jaisi do line wali kinari)
+        outer = ImageChops.subtract(disc_mask((S, S), c, c, R), disc_mask((S, S), c, c, R - 1.3))
+        inner = ImageChops.subtract(disc_mask((S, S), c, c, R - 3.4), disc_mask((S, S), c, c, R - 4.3))
+        self.ring_out = lut_scale(outer, 0.55)
+        self.ring_in = lut_scale(inner, 0.28)
+
+        # upar ka crescent (neeli roshni) aur uska glow jo bahar tak failta hai
+        top = ImageChops.subtract(disc_mask((S, S), c, c, R + 0.6), disc_mask((S, S), c, c + 4.2, R + 0.6))
+        self.top = top.filter(ImageFilter.GaussianBlur(1.3))
+        self.top_glow = cut(lut_scale(top.filter(ImageFilter.GaussianBlur(2.4)), 1.6), 1.2, 22)
+        # neeche ki patli sunehri kinari
+        bot = ImageChops.subtract(disc_mask((S, S), c, c, R + 0.6), disc_mask((S, S), c, c - 2.6, R + 0.6))
+        self.bot = bot.filter(ImageFilter.GaussianBlur(0.8))
+        self.bot_glow = cut(lut_scale(bot.filter(ImageFilter.GaussianBlur(1.8)), 0.9), 1.2, 22)
+        # andar ka glow
+        self.core = radial_L(int(R * 0.95), S, power=1.3, invert=True)
 
         th = PAL["sleeping"]
-        self.cur = dict(c=[tuple(x) for x in th["c"]], inten=th["inten"], pulse=th["pulse"],
-                        speed=th["speed"], scale=th["scale"])
-        self.phase = [0.0, 2.0, 4.0]
+        self.cur = dict(top=th["top"], bot=th["bot"], glow=th["glow"], inner=th["inner"],
+                        spin=th["spin"], sway=th["sway"], scale=th["scale"],
+                        ctop=th["ctop"], cbot=th["cbot"])
+        self.angle = 0.0
         self.t = 0.0
         self.ring = None            # jaagne par phailne wali ring (0..1)
 
     def _blend_state(self, state, dt):
         th = PAL.get(state, PAL["sleeping"])
         k = 1 - math.exp(-dt * 7.0)
-        self.cur["c"] = [lerp3(a, b, k) for a, b in zip(self.cur["c"], th["c"])]
-        for key in ("inten", "pulse", "speed", "scale"):
+        for key in ("top", "bot", "glow", "inner", "spin", "sway", "scale"):
             self.cur[key] += (th[key] - self.cur[key]) * k
+        self.cur["ctop"] = lerp3(self.cur["ctop"], th["ctop"], k)
+        self.cur["cbot"] = lerp3(self.cur["cbot"], th["cbot"], k)
         self.t += dt
-        for i in range(3):
-            self.phase[i] += OMEGA[i] * self.cur["speed"] * dt
+        if th["spin"] > 0:
+            self.angle = (self.angle + self.cur["spin"] * dt) % 360
+        else:                                           # ghoomna band: shortest raste se upar wapas
+            err = ((self.angle + 180) % 360) - 180
+            self.angle = err * math.exp(-dt * 7.0)
         if self.ring is not None:
             self.ring += dt * 1.2
             if self.ring >= 1:
@@ -480,41 +502,42 @@ class Renderer:
         S, R = ORB_S, ORB_R
         c = S / 2
         cur = self.cur
-        base = self.sphere_base.copy()
-        groups = ((3, 0.52, 0.19, 0.95), (3, 0.52, 0.19, 0.90), (3, 0.54, 0.26, 0.65))
-        for gi, (n, la, wb, al) in enumerate(groups):
-            m = Image.new("L", (S, S), 0)
-            d = ImageDraw.Draw(m)
-            for j in range(n):
-                ang = self.phase[gi] + j * 2 * math.pi / n
-                wob = 1 + cur["pulse"] * math.sin(self.t * 3.1 + gi * 2.0 + j * 1.7)
-                dist = 0.40 * R * wob
-                a, b = la * R * wob, wb * R
-                ex0, ey0 = c + dist * math.cos(ang), c + dist * math.sin(ang)
-                ca, sa = math.cos(ang), math.sin(ang)
-                pts = []
-                for k in range(30):
-                    th = 2 * math.pi * k / 30
-                    ex, ey = a * math.cos(th), b * math.sin(th)
-                    pts.append((ex0 + ex * ca - ey * sa, ey0 + ex * sa + ey * ca))
-                d.polygon(pts, fill=255)
-            m = lut_scale(m.filter(ImageFilter.GaussianBlur(1.3)), al * cur["inten"])
-            base = ImageChops.screen(base, tint(m, cur["c"][gi], (S, S)))
+        wave = 0.5 + 0.5 * math.sin(self.t * 6.0)            # bolte waqt dhadkan
+        breath = 0.5 + 0.5 * math.sin(self.t * 1.6)           # halki saans
+        spin_pos = self.angle + cur["sway"] * math.sin(self.t * 2.4)
+        k_top = cur["top"] * (0.85 + 0.15 * breath)
 
-        flick = 0.88 + 0.12 * math.sin(self.t * 2.3)
-        cg = lut_scale(self.center_mask, min(1.0, (0.25 + 0.75 * cur["inten"] ** 1.4) * flick))
-        base = ImageChops.screen(base, tint(cg, (235, 250, 255), (S, S)))
-        base = ImageChops.screen(base, Image.blend(self.black, self.rim, 0.40 + 0.60 * cur["inten"]))
+        # 1) gola + andar ka glow
+        base = self.body.copy()
+        inner_k = cur["inner"] * (0.55 + 0.45 * wave) if cur["sway"] > 5 else cur["inner"] * (0.8 + 0.2 * breath)
+        base = ImageChops.screen(base, tint(lut_scale(self.core, inner_k), cur["ctop"], (S, S)))
+        base = ImageChops.screen(base, tint(self.ring_in, cur["ctop"], (S, S)))
 
         bg = self.key.copy()
-        if self.ring is not None:                       # jaagne ki ring
+        # 2) gola
+        bg.paste(base, (0, 0), self.sphere_mask)
+
+        # 3) rim: upar neeli (ghoomti hui), neeche sunehri
+        top, top_glow = self.top, self.top_glow
+        if abs(spin_pos) > 0.5:
+            top = top.rotate(-spin_pos, resample=Image.BICUBIC)
+            top_glow = top_glow.rotate(-spin_pos, resample=Image.BICUBIC)
+        bg = ImageChops.screen(bg, tint(lut_scale(top_glow, 0.85 * k_top), cur["ctop"], (S, S)))
+        bg = ImageChops.screen(bg, tint(lut_scale(top, 1.6 * k_top), lerp3(cur["ctop"], (255, 255, 255), 0.35),
+                                        (S, S)))
+        bg = ImageChops.screen(bg, tint(lut_scale(self.bot_glow, 0.6 * cur["bot"]), cur["cbot"], (S, S)))
+        bg = ImageChops.screen(bg, tint(lut_scale(self.bot, 1.3 * cur["bot"]), cur["cbot"], (S, S)))
+        bg = ImageChops.screen(bg, tint(lut_scale(self.ring_out, 0.9 + 0.5 * cur["glow"]),
+                                        lerp3(cur["ctop"], cur["cbot"], 0.35), (S, S)))
+
+        # 4) jaagne ki ring
+        if self.ring is not None:
             p = self.ring
             rm = Image.new("L", (S, S), 0)
             rr = R + 4 + p * (S / 2 - R - 8)
             ImageDraw.Draw(rm).ellipse([c - rr, c - rr, c + rr, c + rr], outline=255, width=2)
             rm = lut_scale(rm.filter(ImageFilter.GaussianBlur(0.8)), (1 - p) * 1.1)
-            bg = ImageChops.screen(bg, tint(rm, lerp3(cur["c"][0], (255, 255, 255), 0.3), (S, S)))
-        bg.paste(base, (0, 0), self.sphere_mask)
+            bg = ImageChops.screen(bg, tint(rm, lerp3(cur["ctop"], (255, 255, 255), 0.3), (S, S)))
         return bg
 
     def render(self, state, dt, muted):
@@ -531,12 +554,14 @@ class Renderer:
         return orb
 
     def tray_icon(self):
+        self.cur.update(scale=1.0)
+        self._blend_state("listening", 0.0)
         for _ in range(25):
             self._blend_state("listening", 0.05)
         orb = self.render_orb()
         icon = Image.new("RGBA", (ORB_S, ORB_S), (0, 0, 0, 0))
         icon.paste(orb, (0, 0), self.sphere_mask)
-        m = ORB_S // 2 - ORB_R - 1
+        m = ORB_S // 2 - ORB_R - 3
         return icon.crop((m, m, ORB_S - m, ORB_S - m)).resize((64, 64), LANCZOS)
 
 
@@ -618,8 +643,8 @@ def start_tray(app):
         if OS == "Windows":
             items.append(pystray.MenuItem("Start with Windows", lambda: put(("cmd", "startup")),
                                           checked=lambda i: is_startup_enabled()))
-        items.append(pystray.MenuItem("Quit Ana", lambda: put(("cmd", "quit"))))
-        icon = pystray.Icon("Ana", app.r.tray_icon(), "Ana", pystray.Menu(*items))
+        items.append(pystray.MenuItem("Quit Anna", lambda: put(("cmd", "quit"))))
+        icon = pystray.Icon("Anna", app.r.tray_icon(), ASSISTANT_NAME, pystray.Menu(*items))
         icon.run_detached()
         app.tray = icon
         return True
@@ -655,7 +680,7 @@ class App:
         self.p_orb = ImageTk.PhotoImage(self.r.key)
         c.create_image(ORB_C[0] - ORB_S // 2, ORB_C[1] - ORB_S // 2, image=self.p_orb, anchor="nw")
 
-        # caption bubble (jo bola + Ana ka jawab)
+        # caption bubble (jo bola + Anna ka jawab)
         self.bubble = c.create_polygon(0, 0, 0, 0, 0, 0, smooth=True, fill=BUBBLE_FILL,
                                        outline=BUBBLE_EDGE, width=1, state="hidden")
         self.heard_id = c.create_text(W / 2, 90, text="", anchor="s", fill="#8a90a2", width=300,
@@ -684,7 +709,7 @@ class App:
         if OS == "Windows":
             self.menu.add_command(label="Start with Windows (on/off)", command=self.toggle_startup)
         self.menu.add_separator()
-        self.menu.add_command(label="Quit Ana", command=self.close)
+        self.menu.add_command(label="Quit Anna", command=self.close)
 
         c.bind("<ButtonPress-1>", self.on_press)
         c.bind("<B1-Motion>", self.on_drag)
@@ -746,10 +771,10 @@ class App:
     def toggle_startup(self):
         if is_startup_enabled():
             remove_startup()
-            self.show_note("Startup band: ab Ana apne aap nahi chalegi")
+            self.show_note("Startup band: ab Anna apne aap nahi chalegi")
         else:
             install_startup()
-            self.show_note("Ab Ana laptop on hote hi apne aap chalegi")
+            self.show_note("Ab Anna laptop on hote hi apne aap chalegi")
 
     def show_note(self, text):
         self.reply = text
@@ -924,15 +949,15 @@ def main():
     if "--install-startup" in sys.argv:
         if install_startup():
             launch_detached()
-            print("Ho gaya! Ana abhi background mein chalu ho gayi hai,")
+            print("Ho gaya! Anna abhi background mein chalu ho gayi hai,")
             print("aur ab har baar laptop on hote hi apne aap chalu hogi.")
-            print("Band karne ke liye: tray icon -> Quit Ana")
+            print("Band karne ke liye: tray icon -> Quit Anna")
         else:
             print("Ye option sirf Windows pe hai.")
         return
     if "--remove-startup" in sys.argv:
         remove_startup()
-        print("Startup hata diya. Ab Ana apne aap nahi chalegi.")
+        print("Startup hata diya. Ab Anna apne aap nahi chalegi.")
         return
 
     if sys.stdout is None or sys.stderr is None:      # pythonw: console nahi, to log file
@@ -941,7 +966,7 @@ def main():
 
     lock = acquire_lock()
     if lock is None:
-        print("Ana pehle se chal rahi hai.")
+        print("Anna pehle se chal rahi hai.")
         return
 
     pyautogui.FAILSAFE = True   # mouse ko corner mein le jao to automation ruk jayega

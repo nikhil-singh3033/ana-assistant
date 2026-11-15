@@ -1,6 +1,6 @@
-# Ana – laptop voice assistant
+# Anna – laptop voice assistant
 
-Siri jaisa chhota gol orb. "Hey Ana" bolo, wo jaag jaati hai.
+Siri jaisa chhota gol orb. "Hey Anna" bolo, wo jaag jaati hai.
 
 ## Setup
 ```
@@ -12,4 +12,4 @@ python ana.py
 ```
 python ana.py --install-startup
 ```
-Band karne ke liye tray icon -> Quit Ana. Startup hatane ke liye: `python ana.py --remove-startup`
+Band karne ke liye tray icon -> Quit Anna. Startup hatane ke liye: `python ana.py --remove-startup`
